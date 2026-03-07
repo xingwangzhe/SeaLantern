@@ -6,7 +6,8 @@
 ///
 /// # 使用方式
 /// 在浏览器控制台或前端代码中调用：
-/// await invoke("debug_panic")
+///
+/// await window.__invoke("debug_panic")
 ///
 ///
 /// 触发后程序会立即崩溃，panic hook 会：
