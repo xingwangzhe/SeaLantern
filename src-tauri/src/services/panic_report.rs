@@ -5,8 +5,12 @@
 //! 无需汇编或 unsafe 代码，跨平台兼容。
 //! Linux 平台可读取 /proc、/sys 等虚拟文件系统获取更详细的硬件信息；
 //! 其他平台则使用通用回退值。
+//!
+//! 报告输出目录：可执行文件同级的 `panic-log/` 文件夹。
+//! 报告文件名格式：`panic_<YYYYMMDD_HHMMSS_mmm>.log`，以崩溃时间戳命名，不会覆盖旧报告。
 
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,7 +31,7 @@ static PANIC_HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
 /// hook 触发时会：
 /// 1. 收集崩溃时刻、启动时刻、OS 信息、CPU 温度、内存占用、文件句柄数、CPU 核心数；
 /// 2. 获取 panic 发生的源码位置（文件名、行号、列号）及错误消息；
-/// 3. 将报告写入当前工作目录下的 `Panic_Report` 文件；
+/// 3. 将报告写入可执行文件同级 `panic-log/` 目录下，文件名为 `panic_<时间戳>.log`；
 /// 4. 同时将报告输出到 stderr；
 /// 5. 以退出码 0xFFFF 终止进程。
 pub fn panic_report() {
@@ -79,24 +83,112 @@ pub fn panic_report() {
              ============ReportEnds============\n",
         );
 
-        // 将报告写入文件，写入失败时打印错误但不中断流程
-        let report_path = "Panic_Report";
-        if let Err(e) = fs::write(report_path, &report) {
-            eprintln!("Failed to write panic report to '{report_path}': {e}");
-        } else {
-            println!("Panic report written to '{report_path}'");
+        // 将报告写入 panic-log/ 目录下以时间戳命名的文件
+        // 时间戳取自 UNIX 毫秒数，同时格式化为 YYYYMMDD_HHMMSS_mmm 便于排序与阅读
+        let report_path = build_report_path();
+        match report_path {
+            Ok(path) => {
+                if let Err(e) = fs::write(&path, &report) {
+                    eprintln!("Failed to write panic report to '{}': {e}", path.display());
+                } else {
+                    println!("Panic report written to '{}'", path.display());
+                }
+            }
+            Err(e) => {
+                // 目录创建失败时降级：直接输出到 stderr，不中断后续流程
+                eprintln!("Failed to prepare panic-log directory: {e}");
+            }
         }
 
         // 同时将报告输出到 stderr，方便终端或日志系统捕获
         eprintln!("{report}");
         eprintln!("Sea Lantern PANICKED!!");
 
-        // 重置标志（虽然随后会退出进程，保持语义完整性）
+        // 重置标志（进程即将退出，保持语义完整性）
         PANIC_HOOK_RUNNING.store(false, Ordering::SeqCst);
 
         // 以异常退出码终止进程，告知外部监控程序发生了崩溃
         std::process::exit(0xFFFF);
     }));
+}
+
+/// 构造崩溃报告的完整输出路径。
+///
+/// 目标路径：`<可执行文件目录>/panic-log/panic_<YYYYMMDD_HHMMSS_mmm>.log`
+///
+/// - 若 `panic-log/` 目录不存在则自动创建（含所有父目录）；
+/// - 若无法获取可执行文件路径则回退到当前工作目录；
+/// - 返回 `Err` 仅在目录创建失败时出现。
+fn build_report_path() -> std::io::Result<PathBuf> {
+    // 优先使用可执行文件所在目录，获取失败时回退到当前工作目录
+    let base_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let log_dir = base_dir.join("panic-log");
+
+    // 目录不存在时递归创建，已存在则忽略错误
+    fs::create_dir_all(&log_dir)?;
+
+    // 用崩溃时刻的 UNIX 毫秒时间戳构造唯一文件名
+    let ts_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    // 同时将毫秒时间戳转换为 YYYYMMDD_HHMMSS_mmm 格式，便于人工识别
+    let ts_secs = (ts_millis / 1000) as u64;
+    let ms_part = (ts_millis % 1000) as u32;
+    let ss = ts_secs % 60;
+    let mm = (ts_secs / 60) % 60;
+    let hh = (ts_secs / 3600) % 24;
+    // 计算日期（以 1970-01-01 为基准的简单推算）
+    let days_since_epoch = ts_secs / 86400;
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    let file_name = format!(
+        "panic_{:04}{:02}{:02}_{:02}{:02}{:02}_{:03}.log",
+        year, month, day, hh, mm, ss, ms_part
+    );
+
+    Ok(log_dir.join(file_name))
+}
+
+/// 将从 UNIX epoch 起的天数转换为 (年, 月, 日)。
+///
+/// 使用 Gregorian 历法推算，无需外部 crate。
+fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
+    // 以 400 年为一个循环（146097 天）
+    let year_400 = days / 146097;
+    days %= 146097;
+
+    let year_100 = (days / 36524).min(3);
+    days -= year_100 * 36524;
+
+    let year_4 = days / 1461;
+    days %= 1461;
+
+    let year_1 = (days / 365).min(3);
+    days -= year_1 * 365;
+
+    let year = (year_400 * 400 + year_100 * 100 + year_4 * 4 + year_1 + 1970) as u32;
+
+    // 判断是否为闰年
+    let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let days_in_month = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    let mut month = 1u32;
+    let mut remaining = days as u32;
+    for dim in &days_in_month {
+        if remaining < *dim {
+            break;
+        }
+        remaining -= dim;
+        month += 1;
+    }
+
+    (year, month, remaining + 1)
 }
 
 /// 将 `SystemTime` 格式化为人类可读的字符串。

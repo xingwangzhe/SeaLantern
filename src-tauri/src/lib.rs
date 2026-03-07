@@ -208,7 +208,7 @@ pub fn run() {
             // 仅在 debug 构建（pnpm run tauri dev）下注册调试命令
             // 发布包（pnpm run tauri build）中此命令不存在，不会暴露给最终用户
             #[cfg(debug_assertions)]
-            debug_commands::debug_panic
+            debug_commands::debug_panic //在前端使用  await window.__invoke("debug_panic") 来触发
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
