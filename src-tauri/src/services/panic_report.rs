@@ -2,12 +2,12 @@
 //! 负责在程序崩溃（panic）时收集系统信息并生成崩溃日志。
 //!
 //! 通过 Rust 标准库的 `std::panic::set_hook` 注册全局 panic 回调，
-//! 无需汇编或 unsafe 代码，跨平台兼容。
-//! Linux 平台可读取 /proc、/sys 等虚拟文件系统获取更详细的硬件信息；
-//! 其他平台则使用通用回退值。
+//! 无需汇编或 unsafe 代码，全平台兼容（Linux / macOS / Windows）。
+//! 系统信息（内存、CPU 温度、句柄数）通过已有依赖 `sysinfo` 跨平台获取，
+//! 不再依赖 Linux 专有的 /proc、/sys 虚拟文件系统。
 //!
-//! 报告输出目录：项目根目录（dev 模式）或可执行文件同级的 `panic-log/` 文件夹。
-//! 报告文件名格式：`panic_<YYYYMMDD_HHMMSS_mmm>.log`，以崩溃时间戳命名，不会覆盖旧报告。
+//! 日志输出目录：项目根目录（dev 模式）或可执行文件同级的 `panic-log/` 文件夹。
+//! 日志文件名格式：`panic_<YYYYMMDD_HHMMSS_mmm>.log`，以崩溃时间戳命名，不会覆盖旧日志。
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use chrono::Utc;
+use sysinfo::{Components, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// 记录程序启动时间，用于在崩溃日志中展示运行时长。
 /// 使用 OnceLock 保证只初始化一次，线程安全。
@@ -48,7 +49,7 @@ pub fn init_panic_hook() {
         let crash_time = Utc::now();
         let start_time = *START_TIME.get().expect("start time not set");
 
-        // 用 chrono 格式化时间，输出为 ISO 8601 / RFC 3339 格式，易于阅读与解析
+        // 用 chrono 格式化时间，输出为易于阅读与解析的格式
         let crash_time_str = crash_time.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string();
         let start_time_str = start_time.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string();
 
@@ -61,7 +62,7 @@ pub fn init_panic_hook() {
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown location".to_string());
 
-        // 收集系统环境信息
+        // 收集系统环境信息（全平台，通过 sysinfo 获取）
         let os_info = get_os_info();
         let cpu_temp = get_cpu_temperature();
         let mem_load = get_memory_load();
@@ -151,108 +152,91 @@ fn build_report_path(now: &chrono::DateTime<Utc>) -> std::io::Result<PathBuf> {
     Ok(log_dir.join(file_name))
 }
 
-/// 获取操作系统信息字符串。
+/// 获取操作系统名称及版本信息。
 ///
-/// - Linux：读取 `/proc/version`，包含内核版本及编译信息；
-/// - 其他平台：返回 `std::env::consts::OS`（如 "windows"、"macos"）。
+/// 使用 `sysinfo::System` 跨平台获取，格式为 `<OS名> <版本号>`，
+/// 例如 `"Ubuntu 22.04"` / `"Windows 11"` / `"macOS 14.4"`。
+/// 若信息不可用则返回 `"Unknown"`。
 fn get_os_info() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        fs::read_to_string("/proc/version")
-            .unwrap_or_else(|_| "Unknown".to_string())
-            .trim()
-            .to_string()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // 非 Linux 平台无法读取 /proc/version，返回平台名称作为回退
-        std::env::consts::OS.to_string()
+    let name = System::name().unwrap_or_else(|| "Unknown".to_string());
+    let version = System::os_version().unwrap_or_default();
+    if version.is_empty() {
+        name
+    } else {
+        format!("{name} {version}")
     }
 }
 
 /// 获取 CPU 温度（摄氏度）。
 ///
-/// - Linux：遍历 `/sys/class/thermal/thermal_zone*` 读取第一个有效温度值；
-///   内核以毫摄氏度为单位存储，需除以 1000 转换；
-/// - 其他平台或读取失败：返回 `"N/A"`。
+/// 使用 `sysinfo::Components` 跨平台读取，优先选取标签含 "cpu"（大小写不敏感）的传感器，
+/// 若无匹配则取第一个可用传感器。
+/// 不支持读取温度的平台（如部分虚拟机）返回 `"N/A"`。
 fn get_cpu_temperature() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(entries) = fs::read_dir("/sys/class/thermal") {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                // 只处理 thermal_zone* 目录
-                if path.to_string_lossy().contains("thermal_zone") {
-                    let temp_path = path.join("temp");
-                    if let Ok(temp_str) = fs::read_to_string(&temp_path) {
-                        if let Ok(millideg) = temp_str.trim().parse::<f64>() {
-                            // 内核单位为毫摄氏度，除以 1000 得到摄氏度
-                            return format!("{:.2} C", millideg / 1000.0);
-                        }
-                    }
-                }
-            }
-        }
-        "N/A".to_string()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // 非 Linux 平台暂不支持读取 CPU 温度
-        "N/A".to_string()
+    // Components::new_with_refreshed_list 会自动刷新并列出所有温度传感器
+    let components = Components::new_with_refreshed_list();
+
+    // 优先选取标签含 "cpu" 的传感器，回退到第一个可用传感器
+    let temp = components
+        .iter()
+        .find(|c| c.label().to_lowercase().contains("cpu"))
+        .or_else(|| components.iter().next())
+        .map(|c| c.temperature());
+
+    match temp {
+        Some(t) => format!("{t:.2} C"),
+        None => "N/A".to_string(),
     }
 }
 
 /// 获取当前内存占用百分比（0.0 ~ 100.0）。
 ///
-/// - Linux：解析 `/proc/meminfo` 中的 `MemTotal` 与 `MemAvailable` 字段，
-///   计算 `(total - available) / total * 100`；
-/// - 其他平台或读取失败：返回 `0.0`。
+/// 使用 `sysinfo::System` 跨平台读取物理内存的总量与已用量，
+/// 计算 `used / total * 100`。
+/// 若系统不支持或内存总量为 0，返回 `0.0`。
 fn get_memory_load() -> f64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
-            let mut total = 0u64;
-            let mut available = 0u64;
-            for line in meminfo.lines() {
-                if line.starts_with("MemTotal:") {
-                    // 格式：MemTotal:    <数值> kB
-                    if let Some(val) = line.split_whitespace().nth(1) {
-                        total = val.parse().unwrap_or(0);
-                    }
-                } else if line.starts_with("MemAvailable:") {
-                    // 格式：MemAvailable: <数值> kB
-                    if let Some(val) = line.split_whitespace().nth(1) {
-                        available = val.parse().unwrap_or(0);
-                    }
-                }
-            }
-            if total > 0 {
-                return (total.saturating_sub(available) as f64 / total as f64) * 100.0;
-            }
-        }
-        0.0
+    // 用 new() 构造空实例后仅刷新内存，避免不必要的开销
+    let mut sys = System::new();
+    sys.refresh_memory();
+
+    let total = sys.total_memory();
+    if total == 0 {
+        return 0.0;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // 非 Linux 平台暂不支持读取内存信息
-        0.0
-    }
+    (sys.used_memory() as f64 / total as f64) * 100.0
 }
 
-/// 获取当前进程打开的文件句柄数量。
+/// 获取当前进程打开的文件句柄（文件描述符）数量。
 ///
-/// - Linux：统计 `/proc/self/fd` 目录下的条目数，每个条目对应一个打开的文件描述符；
-/// - 其他平台：返回 `0`。
+/// - Linux：通过统计 `/proc/self/fd` 目录条目数获取精确值；
+/// - 其他平台：通过 `sysinfo` 刷新进程信息后读取其子任务（线程）数作为近似参考，
+///   若均不支持则返回 `0`。
 fn get_handle_count() -> usize {
+    // Linux 上直接统计 /proc/self/fd，最准确
     #[cfg(target_os = "linux")]
     {
-        fs::read_dir("/proc/self/fd")
-            .map(|e| e.count())
-            .unwrap_or(0)
+        if let Ok(dir) = std::fs::read_dir("/proc/self/fd") {
+            return dir.count();
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // 非 Linux 平台暂不支持读取文件句柄数
-        0
-    }
+
+    // 其他平台：用 sysinfo 读取当前进程的子任务数作为句柄数的近似值
+    let pid = match sysinfo::get_current_pid() {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        // sysinfo 0.32 的 ProcessRefreshKind::new() 为空集，不刷新任何额外字段；
+        // 基础进程信息（含 tasks）在 refresh_processes_specifics 调用时默认填充
+        ProcessRefreshKind::new(),
+    );
+
+    sys.process(pid)
+        .and_then(|p| p.tasks())
+        .map(|t| t.len())
+        .unwrap_or(0)
 }
