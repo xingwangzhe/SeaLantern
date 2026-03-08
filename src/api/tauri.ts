@@ -4,12 +4,16 @@ import { handleError, AppError, ErrorType } from "@utils/errorHandler";
 declare global {
   interface Window {
     __TAURI__?: any;
+    // Tauri v2 始终注入此对象，无需 withGlobalTauri 配置
+    __TAURI_INTERNALS__?: any;
   }
 }
 
 // 环境检测：判断是否在浏览器环境（Docker 模式）
+// Tauri v2 默认不注入 window.__TAURI__（需要 withGlobalTauri: true 才有）
+// 但 window.__TAURI_INTERNALS__ 在 Tauri v2 中始终存在，用它来可靠判断
 export const isBrowserEnv = (): boolean => {
-  return typeof window !== "undefined" && !window.__TAURI__;
+  return typeof window !== "undefined" && !window.__TAURI_INTERNALS__;
 };
 
 // HTTP API 基础 URL（Docker 模式下使用）

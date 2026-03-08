@@ -121,5 +121,6 @@ export async function uploadFromDropEvent(event: DragEvent): Promise<UploadedFil
  * 检测当前环境是否支持上传（Docker/浏览器模式）
  */
 export function isUploadSupported(): boolean {
-  return typeof window !== "undefined" && !window.__TAURI__;
+  // Tauri v2 默认不注入 window.__TAURI__，使用 __TAURI_INTERNALS__ 可靠判断
+  return typeof window !== "undefined" && !window.__TAURI_INTERNALS__;
 }
