@@ -15,6 +15,8 @@ pub mod http_command_handlers {
     //! 这些替身只提供 API 的最小签名与安全的空实现，以避免编译器关于未使用
     //! 项目的大量警告或链接错误。真正的实现仍在开启 `docker` feature 时编译。
 
+    #![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
     use futures::future::BoxFuture;
     use serde_json::Value;
     use std::collections::HashMap;
@@ -64,6 +66,9 @@ pub mod http_server {
     //! 当未启用 `docker` feature 时，真实的 HTTP 服务实现（基于 axum/tower-http）
     //! 不会被编译。此处提供最小的 `run_http_server` 替身以保证在非 docker 构建下
     //! 引用该接口的代码仍能编译并正常运行（仅为空实现，不启动任何监听）。
+
+    #![allow(dead_code)]
+
     pub async fn run_http_server(_addr: &str, _static_dir: Option<String>) {
         // 非 docker 构建时不启动 HTTP 服务
     }
