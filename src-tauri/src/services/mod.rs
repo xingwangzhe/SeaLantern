@@ -55,7 +55,19 @@ pub mod http_command_handlers {
 
     // 不导出其它具体 handler 函数（create/import/start/...），这些只在 docker feature 下存在。
 }
+#[cfg(feature = "docker")]
 pub mod http_server;
+#[cfg(not(feature = "docker"))]
+pub mod http_server {
+    //! HTTP 服务模块（Stub）
+    //!
+    //! 当未启用 `docker` feature 时，真实的 HTTP 服务实现（基于 axum/tower-http）
+    //! 不会被编译。此处提供最小的 `run_http_server` 替身以保证在非 docker 构建下
+    //! 引用该接口的代码仍能编译并正常运行（仅为空实现，不启动任何监听）。
+    pub async fn run_http_server(_addr: &str, _static_dir: Option<String>) {
+        // 非 docker 构建时不启动 HTTP 服务
+    }
+}
 pub mod i18n;
 pub mod java_detector;
 pub mod java_installer;
